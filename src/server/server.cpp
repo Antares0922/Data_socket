@@ -4,11 +4,21 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <cstdlib>
+extern "C"{
 #include "modules/sqlite3.h"
+}
+
+#define PUERTO 8080
+#define IP "192.168.0.222"
 
 typedef struct{
-    long long int *Array;
-    size_t longitud;
+    //1 int,long long int
+    //2 float, double
+    //3 char
+    //4 bytes
+    int tipo_dato;
+    void *Array;
+    size_t longitud; 
 } Datos;
 
 //conexion con cada cliente
@@ -28,8 +38,8 @@ int main(){
     }
     //Socket Server Conf
     struct sockaddr_in server_conf;
-    server_conf.sin_addr.s_addr = inet_addr("192.168.0.156");
-    server_conf.sin_port = htons(8080);
+    server_conf.sin_addr.s_addr = inet_addr(IP);
+    server_conf.sin_port = htons(PUERTO);
     server_conf.sin_family = AF_INET;
     for (int i = 0; i<8; i++){server_conf.sin_zero[i] = 0;}
 
@@ -42,16 +52,16 @@ int main(){
 
     std::cout << "Escuchando en el puerto 8080" << std::endl;
     listen(server_fd,2);
-
     //Atendiendo cada cliente
     while(true){
         //Cliente FD
-        struct sockaddr_in cliente_conf;
-        int cliente_fd = connect(cliente_fd,(struct sockaddr*)&cliente_conf,sizeof(cliente_conf));  
+        struct sockaddr_in cliente_dir;
+        socklen_t cliente_len = sizeof(cliente_dir);
+        int cliente_fd = accept(server_fd,(struct sockaddr*)&cliente_dir,&cliente_len);  
 
         //HILO PARA CADA CLIENTE
         int *cp_cliente_fd = (int*)malloc(sizeof(int));
-        cp_cliente_fd = &cliente_fd;
+        *cp_cliente_fd = cliente_fd;
 
         pthread_t thread;
         pthread_create(&thread,NULL,&Conexion_Cliente,(void*)cp_cliente_fd);
@@ -60,56 +70,79 @@ int main(){
     return 0;
 }
 
+
+
 void*Conexion_Cliente(void*arg){
     int cliente_fd = *(int*)arg;
     free(arg);
     //verificar el FD
     if(cliente_fd < 0){
         std::cerr << "ERROR CON EL CLIENTE Hilo:" << pthread_self() << std::endl;
+        close(cliente_fd);
         pthread_exit(nullptr);
     }
-    //opciones de data
-    bool estado = true;
-    while(estado){
-        void*Resultados = (Datos*)malloc(sizeof(Datos));
-        //num de solicitud de dato
-        unsigned int solicitud;
-        recv(cliente_fd,&solicitud,sizeof(unsigned int),0);
-        //parametros
-        char* Ruta_DB;
-        size_t ruta_long;
+    //Obtencion de la ruta a la db
+    size_t ruta_len;
+    recv(cliente_fd,&ruta_len,sizeof(ruta_len),0);
 
-        char *Consulta;
-        size_t consulta_long;
+    char *Ruta_db = (char*)malloc(ruta_len * sizeof(char));
+    recv(cliente_fd,Ruta_db,sizeof(char) * ruta_len,0);
 
-        unsigned int columnas;
+    //obtencion de la consulta
+    size_t consulta_len;
+    recv(cliente_fd,&consulta_len,sizeof(consulta_len),0);
 
-        switch(solicitud){
-            case 100:   //Da el array
-                //recibiendo la ruta
-                recv(cliente_fd,&ruta_long,sizeof(size_t),0);
-                recv(cliente_fd,Ruta_DB,sizeof(char)*ruta_long,0);
+    char *Consulta = (char*)malloc(consulta_len * sizeof(char));
+    recv(cliente_fd,Consulta,sizeof(char)*consulta_len,0);
 
-                //recibiendo la consulta
-                recv(cliente_fd,&consulta_long,sizeof(size_t),0);
-                recv(cliente_fd,Consulta,sizeof(char)*consulta_long,0);
+    //obtencion de las columnas
+    unsigned int columnas;
+    recv(cliente_fd,&columnas,sizeof(columnas),0);
 
-                //numero de columnas de la consulta
-                recv(cliente_fd,&columnas,sizeof(unsigned int),0);
+    //obtencion del codigo identificador
+    unsigned int identificador;
+    recv(cliente_fd,&identificador,sizeof(identificador),0);
 
-                Resultados = (Datos*)Base_Datos(Ruta_DB,Consulta,columnas);
+    switch(identificador){
+        //da la struct sin modificaciones
+        case 100: {
+                      //se rellena la struct
+                      Datos *datos_array = (Datos*)Base_Datos(Ruta_db,Consulta,columnas);
+                      free(Ruta_db);
+                      free(Consulta);
 
-                //enviando la longitud del array
-                send(cliente_fd,&(Datos*)Resultados->longitud,sizeof(size_t),0);
-                send(cliente_fd,Resultados->Array,sizeof(long long int)*Resultados->longitud,0);
-                break;
-            case 1:
-                estado = false;
-                break;
-        }
+                      if(datos_array == nullptr){
+                          std::cerr << "ERROR CON FUNCION BASE_DATOS\n";
+                          free(datos_array);
+                          pthread_exit(nullptr);
+                      }
+
+                      //se escriben los datos
+                      send(cliente_fd,&datos_array->longitud,sizeof(datos_array->longitud),0);  //longitud del array
+                      switch(datos_array->tipo_dato){
+                          case 1:
+                              send(cliente_fd,datos_array->Array,sizeof(long long int) * datos_array->longitud,0);
+                              free(datos_array->Array);
+                              free(datos_array);
+                              break;
+                          case 2:
+                              send(cliente_fd,datos_array->Array,sizeof(double) * datos_array->longitud,0);
+                              free(datos_array->Array);
+                              free(datos_array);
+                              break;
+                      }
+                  }
+        default:
+            break;
     }
+
+    //terminacion del hilo
+    close(cliente_fd);
     return nullptr;
 }
+
+
+
 
 void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas){
     //conexion a la base de datos
@@ -124,22 +157,39 @@ void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas){
         std::cerr << "Error al preparar la consulta\n";
         return nullptr;
     }
+
     //Obteniendo los datos
     Datos *Data = (Datos*)malloc(sizeof(Datos));
     Data->longitud = 0;
 
     while(sqlite3_step(stmt) == SQLITE_ROW){
-        //saca la informacion de toda la fila
+        //tipo de dato a extraer
+        int tipo = sqlite3_column_type(stmt,0);
+        Data->tipo_dato = tipo;
+        //saca la informacion de toda la columna
         for(int i = 0;i<columnas;i++){
             Data->longitud++;
-            long long int numero = sqlite3_column_int64(stmt,i);
-            Data->Array = (long long int*)realloc(Data->Array,Data->longitud * sizeof(long long int));
-            Data->Array[Data->longitud-1] = numero;
+            void *dato;
+            switch(tipo){
+                //int/long long int
+                case 1:
+                    //rellena el dato
+                    dato = (long long int*)malloc(sizeof(long long int));
+                    *(long long int*)dato = sqlite3_column_int64(stmt,i);
+                    //se coloca el contenido en el array
+                    Data->Array = (long long int*)realloc(Data->Array,Data->longitud * sizeof(long long int));
+                    ((long long int*)Data->Array)[Data->longitud-1] = *(long long int*)dato;
+                    free(dato);
+                    break;
+
+                default:
+                    break;
+            }
         }
     }
 
     sqlite3_finalize(stmt);
     sqlite3_close(DB);
-    //retorna el puntero de la lista
+    //retorna el un puntero de la struct
     return Data;
 }
