@@ -10,6 +10,7 @@ extern "C"{
 
 #define PUERTO 8080
 #define IP "192.168.0.222"
+ 
 
 typedef struct{
     //1 int,long long int
@@ -25,7 +26,7 @@ typedef struct{
 void*Conexion_Cliente(void*arg);
 
 //Conexion con la base de datos
-void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas);
+void* Base_Datos(const char*Ruta_DB,const char*Consulta,int *columnas,size_t len_columnas);
 
 
 
@@ -95,9 +96,13 @@ void*Conexion_Cliente(void*arg){
     char *Consulta = (char*)malloc(consulta_len * sizeof(char));
     recv(cliente_fd,Consulta,sizeof(char)*consulta_len,0);
 
+    //obtencion de la longitud de las columnas
+    size_t len_columnas;
+    recv(cliente_fd,&len_columnas,sizeof(len_columnas),0);
+
     //obtencion de las columnas
-    unsigned int columnas;
-    recv(cliente_fd,&columnas,sizeof(columnas),0);
+    int *columnas = (int*)malloc(len_columnas*sizeof(int));
+    recv(cliente_fd,columnas,len_columnas*sizeof(int),0);
 
     //obtencion del codigo identificador
     unsigned int identificador;
@@ -107,13 +112,15 @@ void*Conexion_Cliente(void*arg){
         //da la struct sin modificaciones
         case 100: {
                       //se rellena la struct
-                      Datos *datos_array = (Datos*)Base_Datos(Ruta_db,Consulta,columnas);
+                      Datos *datos_array = (Datos*)Base_Datos(Ruta_db,Consulta,columnas,len_columnas);
                       free(Ruta_db);
                       free(Consulta);
+                      free(columnas);
 
                       if(datos_array == nullptr){
-                          std::cerr << "ERROR CON FUNCION BASE_DATOS\n";
+                          std::cerr << "ERROR CON FUNCION BASE_DATOS hilo:" << pthread_self() << std::endl;
                           free(datos_array);
+                          close(cliente_fd);
                           pthread_exit(nullptr);
                       }
 
@@ -144,7 +151,7 @@ void*Conexion_Cliente(void*arg){
 
 
 
-void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas){
+void* Base_Datos(const char*Ruta_DB,const char*Consulta,int *columnas,size_t len_columnas){
     //conexion a la base de datos
     sqlite3 *DB;
     if(sqlite3_open(Ruta_DB,&DB) != SQLITE_OK){
@@ -166,8 +173,8 @@ void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas){
         //tipo de dato a extraer
         int tipo = sqlite3_column_type(stmt,0);
         Data->tipo_dato = tipo;
-        //saca la informacion de toda la columna
-        for(int i = 0;i<columnas;i++){
+        //saca la informacion de todas la columna
+        for(size_t i = 0;i<len_columnas;i++){
             Data->longitud++;
             void *dato;
             switch(tipo){
@@ -175,7 +182,7 @@ void* Base_Datos(const char*Ruta_DB,const char*Consulta,unsigned int columnas){
                 case 1:
                     //rellena el dato
                     dato = (long long int*)malloc(sizeof(long long int));
-                    *(long long int*)dato = sqlite3_column_int64(stmt,i);
+                    *(long long int*)dato = sqlite3_column_int64(stmt,columnas[i]);
                     //se coloca el contenido en el array
                     Data->Array = (long long int*)realloc(Data->Array,Data->longitud * sizeof(long long int));
                     ((long long int*)Data->Array)[Data->longitud-1] = *(long long int*)dato;
