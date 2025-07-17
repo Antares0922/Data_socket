@@ -4,30 +4,17 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <cstdlib>
+#include <cstring>
 extern "C"{
-#include "modules/sqlite3.h"
+#include "modules/datos.h"
 }
 
 #define PUERTO 8080
 #define IP "192.168.0.222"
  
 
-typedef struct{
-    //1 int,long long int
-    //2 float, double
-    //3 char
-    //4 bytes
-    int tipo_dato;
-    void *Array;
-    size_t longitud; 
-} Datos;
-
 //conexion con cada cliente
 void*Conexion_Cliente(void*arg);
-
-//Conexion con la base de datos
-void* Base_Datos(const char*Ruta_DB,const char*Consulta,int *columnas,size_t len_columnas);
-
 
 
 int main(){
@@ -96,107 +83,62 @@ void*Conexion_Cliente(void*arg){
     char *Consulta = (char*)malloc(consulta_len * sizeof(char));
     recv(cliente_fd,Consulta,sizeof(char)*consulta_len,0);
 
-    //obtencion de la longitud de las columnas
-    size_t len_columnas;
-    recv(cliente_fd,&len_columnas,sizeof(len_columnas),0);
-
-    //obtencion de las columnas
-    int *columnas = (int*)malloc(len_columnas*sizeof(int));
-    recv(cliente_fd,columnas,len_columnas*sizeof(int),0);
+    //obtencion de los numeros de columnas
+    int num_columnas;
+    recv(cliente_fd,&num_columnas,sizeof(num_columnas),0);
 
     //obtencion del codigo identificador
     unsigned int identificador;
     recv(cliente_fd,&identificador,sizeof(identificador),0);
 
+    struct Datos *Data;
+
     switch(identificador){
         //da la struct sin modificaciones
-        case 100: {
-                      //se rellena la struct
-                      Datos *datos_array = (Datos*)Base_Datos(Ruta_db,Consulta,columnas,len_columnas);
-                      free(Ruta_db);
-                      free(Consulta);
-                      free(columnas);
-
-                      if(datos_array == nullptr){
-                          std::cerr << "ERROR CON FUNCION BASE_DATOS hilo:" << pthread_self() << std::endl;
-                          free(datos_array);
-                          close(cliente_fd);
-                          pthread_exit(nullptr);
-                      }
-
-                      //se escriben los datos
-                      send(cliente_fd,&datos_array->longitud,sizeof(datos_array->longitud),0);  //longitud del array
-                      switch(datos_array->tipo_dato){
-                          case 1:
-                              send(cliente_fd,datos_array->Array,sizeof(long long int) * datos_array->longitud,0);
-                              free(datos_array->Array);
-                              free(datos_array);
-                              break;
-                          case 2:
-                              send(cliente_fd,datos_array->Array,sizeof(double) * datos_array->longitud,0);
-                              free(datos_array->Array);
-                              free(datos_array);
-                              break;
-                      }
-                  }
-        default:
+        case 100:
+            //rellenando la struct
+            Data = (struct Datos *)BASE_DATOS(Ruta_db,Consulta,num_columnas);
+            free(Ruta_db);
+            free(Consulta);
+            //mandando sus datos
+            for(int i = 0; i<num_columnas;i++){
+                switch(Data[i].tipo){
+                    //int long long int
+                    case 1:
+                        //tipo
+                        send(cliente_fd,&Data[i].tipo,sizeof(int),0);
+                        //longitud array
+                        send(cliente_fd,&Data[i].longitud,sizeof(size_t),0);
+                        //array
+                        send(cliente_fd,Data[i].Array[0],Data[i].longitud*sizeof(long long int),0);
+                        free(Data[i].Array[0]);
+                        free(Data[i].Array);
+                        break;
+                    case 2:
+                        break;
+                    case 3:
+                        //tipo
+                        send(cliente_fd,&Data[i].tipo,sizeof(int),0);
+                        //longitud del array
+                        send(cliente_fd,&Data[i].longitud,sizeof(size_t),0);
+                        //array
+                        for (size_t j = 0; j<Data[i].longitud; j++){
+                            size_t len_string = strlen((char*)Data[i].Array[j]);
+                            //len del strings
+                            send(cliente_fd,&len_string,sizeof(size_t),0);
+                            //se manda el string
+                            send(cliente_fd,Data[i].Array[j],sizeof(char)*len_string,0);
+                        }
+                        break;
+                }
+            }
             break;
     }
 
     //terminacion del hilo
+    free(Data);
     close(cliente_fd);
     return nullptr;
 }
 
 
-
-
-void* Base_Datos(const char*Ruta_DB,const char*Consulta,int *columnas,size_t len_columnas){
-    //conexion a la base de datos
-    sqlite3 *DB;
-    if(sqlite3_open(Ruta_DB,&DB) != SQLITE_OK){
-        std::cerr << "Error al abrir la base de datos " << sqlite3_errmsg(DB) << std::endl;
-        return nullptr;
-    }
-    //preparando la consulta
-    sqlite3_stmt *stmt;
-    if(sqlite3_prepare_v2(DB,Consulta,-1,&stmt,nullptr) != SQLITE_OK){
-        std::cerr << "Error al preparar la consulta\n";
-        return nullptr;
-    }
-
-    //Obteniendo los datos
-    Datos *Data = (Datos*)malloc(sizeof(Datos));
-    Data->longitud = 0;
-
-    while(sqlite3_step(stmt) == SQLITE_ROW){
-        //tipo de dato a extraer
-        int tipo = sqlite3_column_type(stmt,0);
-        Data->tipo_dato = tipo;
-        //saca la informacion de todas la columna
-        for(size_t i = 0;i<len_columnas;i++){
-            Data->longitud++;
-            void *dato;
-            switch(tipo){
-                //int/long long int
-                case 1:
-                    //rellena el dato
-                    dato = (long long int*)malloc(sizeof(long long int));
-                    *(long long int*)dato = sqlite3_column_int64(stmt,columnas[i]);
-                    //se coloca el contenido en el array
-                    Data->Array = (long long int*)realloc(Data->Array,Data->longitud * sizeof(long long int));
-                    ((long long int*)Data->Array)[Data->longitud-1] = *(long long int*)dato;
-                    free(dato);
-                    break;
-
-                default:
-                    break;
-            }
-        }
-    }
-
-    sqlite3_finalize(stmt);
-    sqlite3_close(DB);
-    //retorna el un puntero de la struct
-    return Data;
-}
